@@ -1,0 +1,365 @@
+services:
+
+  # ── 1. ZOOKEEPER ─────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lakehouse-net
+
+  # ── 2. KAFKA ──────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 24
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    networks:
+      - lakehouse-net
+
+  # ── 3. SCHEMA REGISTRY ────────────────────────────────────
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.6.0
+    container_name: schema-registry
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+    networks:
+      - lakehouse-net
+
+  # ── 4. KAFKA UI ───────────────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - schema-registry
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+    networks:
+      - lakehouse-net
+
+  # ── 5. MINIO ──────────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lakehouse-net
+
+  minio-setup:
+    image: minio/mc:latest
+    container_name: minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 minioadmin minioadmin123 &&
+        mc mb --ignore-existing local/bronze &&
+        mc mb --ignore-existing local/silver &&
+        mc mb --ignore-existing local/gold &&
+        mc mb --ignore-existing local/warehouse &&
+        echo '✅ Buckets ready!'
+      "
+    networks:
+      - lakehouse-net
+
+  # ── 6. POSTGRESQL 13 ──────────────────────────────────────
+  postgres:
+    image: postgres:13
+    container_name: postgres
+    environment:
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive123
+      POSTGRES_DB: metastore
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lakehouse-net
+
+  # ── 7. HIVE METASTORE (custom build dengan S3A JARs) ──────
+  hive-metastore:
+    build:
+      context: .
+      dockerfile: hive.Dockerfile
+    container_name: hive-metastore
+    volumes : 
+        - ./hive-site.xml:/opt/hive/conf/hive-site.xml 
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      - "9083:9083"
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      SERVICE_OPTS: >-
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres:5432/metastore
+        -Djavax.jdo.option.ConnectionUserName=hive
+        -Djavax.jdo.option.ConnectionPassword=hive123
+        -Dfs.s3a.endpoint=http://minio:9000
+        -Dfs.s3a.access.key=minioadmin
+        -Dfs.s3a.secret.key=minioadmin123
+        -Dfs.s3a.path.style.access=true
+        -Dfs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9083 || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+    networks:
+      - lakehouse-net
+
+  # ── 8. SPARK MASTER ───────────────────────────────────────
+  spark-master:
+    build:
+      context: ./processing/spark
+      dockerfile: Dockerfile
+    container_name: spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      HIVE_METASTORE_URI: thrift://hive-metastore:9083
+    ports:
+      - "8082:8080"
+      - "7077:7077"
+    volumes:
+      - ./processing/spark/jobs:/opt/spark/work-dir
+      - spark_checkpoints:/opt/spark/checkpoints
+    depends_on:
+      - minio
+      - kafka
+      - hive-metastore
+    networks:
+      - lakehouse-net
+
+  # ── 9. SPARK WORKER ───────────────────────────────────────
+  spark-worker:
+    build:
+      context: ./processing/spark
+      dockerfile: Dockerfile
+    container_name: spark-worker
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_WORKER_MEMORY: 2g
+      SPARK_WORKER_CORES: 2
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      HIVE_METASTORE_URI: thrift://hive-metastore:9083
+    volumes:
+      - ./processing/spark/jobs:/opt/spark/work-dir
+      - spark_checkpoints:/opt/spark/checkpoints
+    networks:
+      - lakehouse-net
+  
+# ── BRONZE INGEST (auto-start) ────────────────────────────
+  bronze-ingest:
+    build:
+      context: ./processing/spark
+      dockerfile: Dockerfile
+    container_name: bronze-ingest
+    command: [
+      "/opt/spark/bin/spark-submit",
+      "--master", "spark://spark-master:7077",
+      "/opt/spark/work-dir/bronze_ingest.py"
+    ]
+    depends_on:
+      - spark-master
+      - spark-worker
+      - hive-metastore
+      - kafka
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+      HIVE_METASTORE_URI: thrift://hive-metastore:9083
+    volumes:
+      - ./processing/spark/jobs:/opt/spark/work-dir
+      - spark_checkpoints:/opt/spark/checkpoints
+    restart: on-failure
+    networks:
+      - lakehouse-net
+
+
+  # ── AIRFLOW POSTGRES ──────────────────────────────────────
+  airflow-postgres:
+    image: postgres:13
+    container_name: airflow-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow123
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lakehouse-net
+
+  # ── AIRFLOW INIT ──────────────────────────────────────────
+  airflow-init:
+    image: apache/airflow:2.7.3
+    container_name: airflow-init
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow123@airflow-postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin123
+    command: version
+    networks:
+      - lakehouse-net
+
+  # ── AIRFLOW WEBSERVER ─────────────────────────────────────
+  airflow-webserver:
+    image: apache/airflow:2.7.3
+    container_name: airflow-webserver
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+    ports:
+      - "8888:8080"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow123@airflow-postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    volumes:
+      - ./orchestration/dags:/opt/airflow/dags
+    command: webserver
+    networks:
+      - lakehouse-net
+
+  # ── AIRFLOW SCHEDULER ─────────────────────────────────────
+  airflow-scheduler:
+    image: apache/airflow:2.7.3
+    container_name: airflow-scheduler
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow123@airflow-postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    volumes:
+      - ./orchestration/dags:/opt/airflow/dags
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: scheduler
+    networks:
+      - lakehouse-net
+
+
+  # ── 10. TRINO ─────────────────────────────────────────────
+  trino:
+    image: trinodb/trino:426
+    container_name: trino
+    depends_on:
+      - hive-metastore
+      - minio
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./query/trino/catalog:/etc/trino/catalog
+      - ./query/trino/config/config.properties:/etc/trino/config.properties
+    networks:
+      - lakehouse-net
+
+  # ── 11. FASTAPI ───────────────────────────────────────────
+  api:
+    build: ./api
+    container_name: fastapi
+    depends_on:
+      - trino
+    ports:
+      - "8000:8000"
+    environment:
+      TRINO_HOST: trino
+      TRINO_PORT: 8080
+      TRINO_CATALOG: iceberg
+      TRINO_SCHEMA: gold
+    networks:
+      - lakehouse-net
+
+volumes:
+  minio_data:
+  postgres_data:
+  warehouse_data:
+  spark_checkpoints:
+  airflow_postgres_data:
+  
+
+networks:
+  lakehouse-net:
+    driver: bridge

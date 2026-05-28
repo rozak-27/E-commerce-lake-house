@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+node_modules/
+.next/
+dist/
+*.egg-info/
+.DS_Store
+*.log
+minio_data/
+grafana_data/

@@ -1,0 +1,23 @@
+{
+  "type": "record",
+  "name": "UserEvent",
+  "namespace": "com.ecommerce.events",
+  "fields": [
+    {"name": "event_id",      "type": "string"},
+    {"name": "event_type",    "type": "string"},
+    {"name": "user_id",       "type": "string"},
+    {"name": "session_id",    "type": "string"},
+    {"name": "timestamp",     "type": "string"},
+    {"name": "platform",      "type": "string"},
+    {"name": "ip_address",    "type": ["null","string"], "default": null},
+    {"name": "product_id",    "type": ["null","string"], "default": null},
+    {"name": "product_name",  "type": ["null","string"], "default": null},
+    {"name": "category",      "type": ["null","string"], "default": null},
+    {"name": "price",         "type": ["null","double"], "default": null},
+    {"name": "order_id",      "type": ["null","string"], "default": null},
+    {"name": "total_amount",  "type": ["null","double"], "default": null},
+    {"name": "payment_method","type": ["null","string"], "default": null},
+    {"name": "query",         "type": ["null","string"], "default": null},
+    {"name": "rating",        "type": ["null","int"],    "default": null}
+  ]
+}
