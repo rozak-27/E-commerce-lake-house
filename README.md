@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # E-Commerce Lakehouse Data Platform
 
 Full-stack data lakehouse pipeline:
@@ -32,3 +33,6 @@ cd dashboard && npm install && npm run dev
 
 ## Tech Stack
 - Python 3.11, Kafka, Apache Spark 3.5, MinIO, Apache Iceberg, Trino, FastAPI, React/Next.js, Airflow, Prometheus, Grafana, Docker
+=======
+# E-commerce-lake-house
+>>>>>>> 670ac08b5f8b2d81e173fc4a10fa4299548d87fd
