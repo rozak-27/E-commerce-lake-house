@@ -15,7 +15,7 @@ Full-stack data lakehouse pipeline:
 6. API             → FastAPI
 7. Dashboard       → React + Next.js + TypeScript
 8. Orchestration   → Apache Airflow
-9. Monitoring      → Prometheus + Grafana
+9. Monitoring      → Prometheus 
 ```
 
 ## Quick Start
